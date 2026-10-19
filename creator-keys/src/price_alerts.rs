@@ -1,49 +1,49 @@
 //! #1030 — On-chain price alerts for bonding-curve threshold crossings.
-//!
-//! A wallet registers a target price on a key together with an
-//! [`AlertDirection`]. Every buy and sell compares the key's bonding-curve
-//! spot price (the price of the next key, as returned by
-//! `get_price_at_supply` for the current supply) before and after the trade.
-//! An alert whose target the price crossed emits
-//! [`events::PriceAlertTriggeredEvent`] and is deactivated in the same call, so
-//! it never fires again, even if the price later crosses back and forth.
-//!
-//! Crossing rules, with `prev` / `new` the spot price before / after a trade:
-//!
-//! - [`AlertDirection::Above`] fires when `prev < target && new >= target`.
-//! - [`AlertDirection::Below`] fires when `prev > target && new <= target`.
-//!
-//! An alert registered while the price already sits on the far side of its
-//! target therefore waits for the price to come back and cross it.
-//!
-//! # Storage
-//!
-//! - [`PriceAlertDataKey::KeyAlerts`] holds every active alert on one key. It
-//!   is the source of truth and the only entry a trade reads, so the cost a
-//!   trade pays for alerts is one ledger entry, however many wallets watch the
-//!   key.
-//! - [`PriceAlertDataKey::WalletAlerts`] lists `(key_id, alert_id)` references
-//!   for one wallet so [`get_alerts`] does not scan every key. Firing an alert
-//!   only rewrites the key's entry: updating each triggered wallet's entry too
-//!   would let alerts force an unbounded number of writes into somebody
-//!   else's trade. References to fired alerts are therefore left behind,
-//!   filtered out by [`get_alerts`], and pruned the next time the wallet
-//!   registers or cancels an alert.
-//! - [`PriceAlertDataKey::NextAlertId`] is the last issued alert id.
-//!
-//! All three are persistent entries extended to the full
-//! [`crate::CREATOR_TTL_LEDGERS`] window when written. A key's alert entry is
-//! also extended on every trade that reads it, like the rest of the creator
-//! state a trade touches.
-//!
-//! # Limits
-//!
-//! - [`MAX_ACTIVE_ALERTS_PER_KEY`] bounds the entry a trade reads and the
-//!   number of [`events::PriceAlertTriggeredEvent`]s one trade can emit.
-//! - [`MAX_ACTIVE_ALERTS_PER_WALLET`] bounds the entries [`get_alerts`] reads.
-//!
-//! A wallet frees a slot when one of its alerts fires or when it calls
-//! [`cancel_alert`].
+///
+/// A wallet registers a target price on a key together with an
+/// [`AlertDirection`]. Every buy and sell compares the key's bonding-curve
+/// spot price (the price of the next key, as returned by
+/// `get_price_at_supply` for the current supply) before and after the trade.
+/// An alert whose target the price crossed emits
+/// [`events::PriceAlertTriggeredEvent`] and is deactivated in the same call, so
+/// it never fires again, even if the price later crosses back and forth.
+///
+/// Crossing rules, with `prev` / `new` the spot price before / after a trade:
+///
+/// - [`AlertDirection::Above`] fires when `prev < target && new >= target`.
+/// - [`AlertDirection::Below`] fires when `prev > target && new <= target`.
+///
+/// An alert registered while the price already sits on the far side of its
+/// target therefore waits for the price to come back and cross it.
+///
+/// # Storage
+///
+/// - [`PriceAlertDataKey::KeyAlerts`] holds every active alert on one key. It
+///   is the source of truth and the only entry a trade reads, so the cost a
+///   trade pays for alerts is one ledger entry, however many wallets watch the
+///   key.
+/// - [`PriceAlertDataKey::WalletAlerts`] lists `(key_id, alert_id)` references
+///   for one wallet so [`get_alerts`] does not scan every key. Firing an alert
+///   only rewrites the key's entry: updating each triggered wallet's entry too
+///   would let alerts force an unbounded number of writes into somebody
+///   else's trade. References to fired alerts are therefore left behind,
+///   filtered out by [`get_alerts`], and pruned the next time the wallet
+///   registers or cancels an alert.
+/// - [`PriceAlertDataKey::NextAlertId`] is the last issued alert id.
+///
+/// All three are persistent entries extended to the full
+/// [`crate::CREATOR_TTL_LEGERS`] window when written. A key's alert entry is
+/// also extended on every trade that reads it, like the rest of the creator
+/// state a trade touches.
+///
+/// # Limits
+///
+/// - [`MAX_ACTIVE_ALERTS_PER_KEY`] bounds the entry a trade reads and the
+///   number of [`events::PriceAlertTriggeredEvent`]s one trade can emit.
+/// - [`MAX_ACTIVE_ALERTS_PER_WALLET`e bounds the entries [`get_alerts`] reads.
+///
+/// A wallet frees a slot when one of its alerts fires or when it calls
+/// [`cancel_alert`].
 
 use crate::events::{
     self, PriceAlertCancelledEvent, PriceAlertRegisteredEvent, PriceAlertTriggeredEvent,
@@ -52,7 +52,7 @@ use crate::{
     compute_bonding_curve_price, constants, extend_key_ttl_to_full_window,
     read_registered_creator_profile, ContractError,
 };
-use soroban_sdk::{contracttype, Address, Env, Vec};
+use soroban_sdk:{contracttype, Address, Env, Vec};
 
 /// Maximum number of active alerts on a single key.
 ///
@@ -202,7 +202,7 @@ fn next_alert_id(env: &Env) -> Result<u64, ContractError> {
         .checked_add(1)
         .ok_or(ContractError::Overflow)?;
     env.storage().persistent().set(&key, &next);
-    extend_key_ttl_to_full_window(env, &key);
+    extend_key_ttl_to_full_window(env, @key);
     Ok(next)
 }
 
@@ -274,14 +274,14 @@ pub fn cancel_alert(env: &Env, wallet: &Address, alert_id: u64) -> Result<(), Co
     wallet_alerts.remove(i);
     write_wallet_refs(env, wallet, &refs_for(env, &wallet_alerts));
 
-    let mut key_alerts = read_key_alerts(env, &key_id);
+    let mut key_alerts = read_key_alerts(env, @key_id);
     if let Some(k) = find_alert(&key_alerts, alert_id) {
         key_alerts.remove(k);
     }
-    write_key_alerts(env, &key_id, &key_alerts);
+    write_key_alerts(env, @key_id, @key_alerts);
 
     env.events().publish(
-        events::price_alert_cancelled_topics(&key_id, wallet),
+        events::price_alert_cancelled_topics(@key_id, wallet),
         PriceAlertCancelledEvent {
             wallet: wallet.clone(),
             key_id,
@@ -290,7 +290,7 @@ pub fn cancel_alert(env: &Env, wallet: &Address, alert_id: u64) -> Result<(), Co
         },
     );
 
-    Ok(())
+    Ok(()
 }
 
 /// Returns `wallet`'s active alerts in registration order. Alerts that have
@@ -318,30 +318,18 @@ pub(crate) fn check_price_alerts(env: &Env, key_id: &Address, prev_supply: u32, 
         Some(alerts) => alerts,
         None => return,
     };
-    // The trade read the entry, so keep it live like the rest of the key's state.
+    // The trade read the key's alert entry, so extend it like the rest of
+    // the creator state the trade touched.
     extend_key_ttl_to_full_window(env, &key);
 
-    if prev_supply == new_supply {
-        return;
-    }
-    let base_price: i128 = match env
-        .storage()
-        .persistent()
-        .get(&constants::storage::KEY_PRICE)
-    {
-        Some(price) => price,
-        None => return,
+    let prev_price = match compute_bonding_curve_price(env, key_id, prev_supply) {
+        Ok(price) => price,
+        Err(_) => return,
     };
-    let (prev_price, new_price) = match (
-        compute_bonding_curve_price(env, key_id, base_price, prev_supply),
-        compute_bonding_curve_price(env, key_id, base_price, new_supply),
-    ) {
-        (Ok(prev), Ok(new)) => (prev, new),
-        _ => return,
+    let new_price = match compute_bonding_curve_price(env, key_id, new_supply) {
+        Ok(price) => price,
+        Err(_) => return,
     };
-    if prev_price == new_price {
-        return;
-    }
 
     let mut remaining = Vec::new(env);
     for alert in alerts.iter() {
@@ -354,7 +342,7 @@ pub(crate) fn check_price_alerts(env: &Env, key_id: &Address, prev_supply: u32, 
                     alert_id: alert.alert_id,
                     direction: alert.direction,
                     target_price: alert.target_price,
-                    new_price,
+                    price: new_price,
                     ledger: env.ledger().sequence(),
                 },
             );
@@ -362,6 +350,7 @@ pub(crate) fn check_price_alerts(env: &Env, key_id: &Address, prev_supply: u32, 
             remaining.push_back(alert);
         }
     }
+
     if remaining.len() != alerts.len() {
         write_key_alerts(env, key_id, &remaining);
     }

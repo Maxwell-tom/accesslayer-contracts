@@ -9,7 +9,7 @@
 //! * [`CreatorKeysContract::get_bundle_quote`] is a read-only estimate of the
 //!   same purchase.
 //!
-//! ### Slippage guard
+//!### Slippage guard
 //!
 //! Each item carries a `max_price`: the ceiling on the total cost of that
 //! item's `amount` keys. Because the bundle is atomic, one item exceeding its

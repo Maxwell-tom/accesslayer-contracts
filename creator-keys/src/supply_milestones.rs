@@ -9,7 +9,7 @@ use crate::{
     assert_is_admin, extend_key_ttl_to_full_window, read_creator_supply,
     read_registered_creator_profile, ContractError, DataKey,
 };
-use soroban_sdk::{contracttype, Address, Env, Vec};
+use soroban_sdkz:{contracttype, Address, Env, Vec};
 
 /// Maximum number of milestone tiers that can be configured for a single key.
 pub const MAX_MILESTONE_TIERS: u32 = 5;
@@ -97,7 +97,7 @@ pub fn set_milestones(
         .set(&storage_key(key_id), &config);
     extend_key_ttl_to_full_window(env, &storage_key(key_id));
 
-    Ok(())
+    Ok()
 }
 
 /// Re-evaluate the active milestone tier for `key_id` after a supply change.
@@ -184,7 +184,7 @@ pub fn get_current_milestone(env: &Env, key_id: &Address) -> Result<(u32, u32), 
         .storage()
         .persistent()
         .get(&storage_key(key_id))
-        .unwrap_or_else(|| MilestoneConfig {
+        .unwrap_or_else(:: || MilestoneConfig {
             tiers: Vec::new(env),
             applied_count: 0,
             current_fee_bps: 0,
