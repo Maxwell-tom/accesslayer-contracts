@@ -40,7 +40,7 @@
 ///
 /// - [`MAX_ACTIVE_ALERTS_PER_KEY`] bounds the entry a trade reads and the
 ///   number of [`events::PriceAlertTriggeredEvent`]s one trade can emit.
-/// - [`MAX_ACTIVE_ALERTS_PER_WALLET`e bounds the entries [`get_alerts`] reads.
+/// - [`MAX_ACTIVE_ALERTS_PER_WALLET`] bounds the entries [`get_alerts`] reads.
 ///
 /// A wallet frees a slot when one of its alerts fires or when it calls
 /// [`cancel_alert`].
@@ -52,7 +52,7 @@ use crate::{
     compute_bonding_curve_price, constants, extend_key_ttl_to_full_window,
     read_registered_creator_profile, ContractError,
 };
-use soroban_sdk:{contracttype, Address, Env, Vec};
+use soroban_sdk::{contracttype, Address, Env, Vec};
 
 /// Maximum number of active alerts on a single key.
 ///
@@ -202,7 +202,7 @@ fn next_alert_id(env: &Env) -> Result<u64, ContractError> {
         .checked_add(1)
         .ok_or(ContractError::Overflow)?;
     env.storage().persistent().set(&key, &next);
-    extend_key_ttl_to_full_window(env, @key);
+    extend_key_ttl_to_full_window(env, &key);
     Ok(next)
 }
 
@@ -274,14 +274,14 @@ pub fn cancel_alert(env: &Env, wallet: &Address, alert_id: u64) -> Result<(), Co
     wallet_alerts.remove(i);
     write_wallet_refs(env, wallet, &refs_for(env, &wallet_alerts));
 
-    let mut key_alerts = read_key_alerts(env, @key_id);
+    let mut key_alerts = read_key_alerts(env, &key_id);
     if let Some(k) = find_alert(&key_alerts, alert_id) {
         key_alerts.remove(k);
     }
-    write_key_alerts(env, @key_id, @key_alerts);
+    write_key_alerts(env, &key_id, &key_alerts);
 
     env.events().publish(
-        events::price_alert_cancelled_topics(@key_id, wallet),
+        events::price_alert_cancelled_topics(&key_id, wallet),
         PriceAlertCancelledEvent {
             wallet: wallet.clone(),
             key_id,
@@ -290,7 +290,7 @@ pub fn cancel_alert(env: &Env, wallet: &Address, alert_id: u64) -> Result<(), Co
         },
     );
 
-    Ok(()
+    Ok(())
 }
 
 /// Returns `wallet`'s active alerts in registration order. Alerts that have
