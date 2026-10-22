@@ -293,6 +293,9 @@ pub enum ContractError {
     /// `[community_polls::MIN_POLL_OPTIONS, community_polls::MAX_POLL_OPTIONS]`,
     /// an option's text was empty, or a vote's `option_index` was out of range.
     InvalidPollOption = 137,
+    /// The two sides of an atomic swap deviate in value by more than the
+    /// caller's `max_parity_deviation_bps` tolerance.
+    ParityDeviationExceeded = 138,
 }
 
 impl ContractError {
@@ -2662,6 +2665,20 @@ pub struct PauseState {
 }
 
 /// Single discount tier definition.
+///
+/// # Evaluation Order & Tie Resolution (#549)
+/// Tiers are evaluated in strictly ascending order of minimum volume threshold (`threshold`).
+/// When a creator's cumulative volume qualifies for multiple discount tiers, the last matching
+/// tier wins, applying the lowest fee rate.
+///
+/// ### Worked Example
+/// Given three tiers at 1,000, 5,000, and 10,000 XLM volume:
+/// A creator at 7,000 XLM qualifies for the first two tiers (1,000 and 5,000 XLM) and receives
+/// the tier-2 fee rate (the last matching tier).
+///
+/// ### Invariants
+/// - Tier updates take effect on the next trade and do not apply retroactively.
+/// - Once earned, a tier is retained even if volume theoretically drops below a threshold.
 #[derive(Clone, Debug, Eq, PartialEq)]
 #[contracttype]
 pub struct DiscountTier {
@@ -5006,8 +5023,14 @@ pub(crate) fn extend_creator_ttl(env: &Env, creator: &Address) {
     // Only emit the TTL extension event when the remaining TTL was below the
     // extension threshold before this call. A healthy TTL silently skips the event.
     if needs_event {
-        env.events()
-            .publish(events::ttl_extended_topics(creator), extend_to);
+        env.events().publish(
+            events::ttl_extended_topics(creator),
+            events::TtlExtendedEvent {
+                creator_id: creator.clone(),
+                extended_at_ledger: current_ledger,
+                new_expiry_ledger: extend_to,
+            },
+        );
     }
 }
 
@@ -11873,6 +11896,14 @@ impl CreatorKeysContract {
         dynamic_fees::current_fee_bps(&env, &key_id)
     }
 
+    /// Read-only view of a key's active fee tier and the volume left to the next tier.
+    pub fn get_active_fee_tier(
+        env: Env,
+        key_id: Address,
+    ) -> Result<dynamic_fees::ActiveFeeTier, ContractError> {
+        dynamic_fees::active_fee_tier(&env, &key_id)
+    }
+
     /// Read-only view of a key's rolling 24-hour gross trade volume.
     pub fn get_key_rolling_volume(env: Env, key_id: Address) -> Result<i128, ContractError> {
         read_registered_creator_profile(&env, &key_id)?;
@@ -11984,6 +12015,7 @@ impl CreatorKeysContract {
                 events::ProtocolFeeRecipientUpdatedEvent {
                     old_recipient: old,
                     new_recipient: recipient,
+                    updated_at_ledger: env.ledger().sequence(),
                 },
             );
         }
@@ -12462,6 +12494,91 @@ impl CreatorKeysContract {
         }
     }
 
+    /// Executes an atomic cross-key swap between two wallets.
+    ///
+    /// `wallet_a` gives `qty_a` of `key_a` and receives `qty_b` of `key_b` from
+    /// `wallet_b`, all in one transaction. Both legs are key transfers, so the
+    /// swap reverts as a whole if either leg fails — a partial swap cannot land.
+    ///
+    /// Each side is priced from its live bonding-curve spot price (the next-key
+    /// price at the current supply) before any transfer. Transfers do not move
+    /// supply, so the prices used for the check still hold when the legs execute.
+    /// The swap is rejected with [`ContractError::ParityDeviationExceeded`] when
+    /// the two values deviate by more than `max_parity_deviation_bps` basis
+    /// points of the larger side; a tolerance of `0` requires an exact match.
+    ///
+    /// Both wallets must authorize the call: each leg requires its sending
+    /// wallet's authorization. On success an [`events::AtomicSwapEvent`] is
+    /// emitted carrying both keys, quantities and prices.
+    #[allow(clippy::too_many_arguments)]
+    pub fn atomic_swap(
+        env: Env,
+        key_a: Address,
+        qty_a: u32,
+        wallet_a: Address,
+        key_b: Address,
+        qty_b: u32,
+        wallet_b: Address,
+        max_parity_deviation_bps: u32,
+    ) -> Result<(), ContractError> {
+        if qty_a == 0 || qty_b == 0 {
+            return Err(ContractError::ZeroTransferAmount);
+        }
+        if key_a == key_b {
+            return Err(ContractError::SelfTransfer);
+        }
+
+        let price_a = resolve_quote_inputs(&env, &key_a)?.unwrap_or(0);
+        let price_b = resolve_quote_inputs(&env, &key_b)?.unwrap_or(0);
+        let value_a = price_a
+            .checked_mul(i128::from(qty_a))
+            .ok_or(ContractError::Overflow)?;
+        let value_b = price_b
+            .checked_mul(i128::from(qty_b))
+            .ok_or(ContractError::Overflow)?;
+
+        // |value_a - value_b| / max(value_a, value_b) * 10_000 <= tolerance.
+        // Compared in basis points so a tolerance of 0 only passes on equality.
+        let (higher, lower) = if value_a >= value_b {
+            (value_a, value_b)
+        } else {
+            (value_b, value_a)
+        };
+        if higher > 0 {
+            let deviation_bps = (higher - lower)
+                .checked_mul(10_000)
+                .ok_or(ContractError::Overflow)?
+                / higher;
+            if deviation_bps > i128::from(max_parity_deviation_bps) {
+                return Err(ContractError::ParityDeviationExceeded);
+            }
+        }
+
+        Self::transfer_keys(
+            env.clone(),
+            key_a.clone(),
+            wallet_a.clone(),
+            wallet_b.clone(),
+            qty_a,
+        )?;
+        Self::transfer_keys(env.clone(), key_b.clone(), wallet_b, wallet_a, qty_b)?;
+
+        env.events().publish(
+            events::atomic_swap_topics(&key_a, &key_b),
+            events::AtomicSwapEvent {
+                key_a,
+                qty_a,
+                price_a,
+                key_b,
+                qty_b,
+                price_b,
+                ledger: env.ledger().sequence(),
+            },
+        );
+
+        Ok(())
+    }
+
     /// Deposits `amount` as a dividend for all current key holders of `creator`.
     ///
     /// The protocol fee is deducted first; the remainder is distributed proportionally
@@ -12837,6 +12954,7 @@ impl CreatorKeysContract {
             events::ProtocolFeeRecipientUpdatedEvent {
                 old_recipient,
                 new_recipient,
+                updated_at_ledger: env.ledger().sequence(),
             },
         );
 
@@ -19622,6 +19740,11 @@ impl CreatorKeysContract {
         lp_reward::get_lp_position(&env, lp_id)
     }
 
+    /// Returns pending rewards for a given LP position.
+    pub fn get_lp_rewards(env: Env, lp_id: u64) -> Result<i128, lp_reward::LpRewardError> {
+        lp_reward::get_lp_rewards(&env, lp_id)
+    }
+
     /// Accrues fee rewards to key pair pool proportional to trading volume.
     pub fn accrue_lp_trading_fee(
         env: Env,
@@ -19812,6 +19935,26 @@ impl CreatorKeysContract {
         );
 
         Ok(())
+    }
+
+    pub fn set_fee_tiers(
+        env: Env,
+        admin: Address,
+        tiers: Vec<FeeTier>,
+    ) -> Result<(), ContractError> {
+        set_fee_tiers(env, admin, tiers)
+    }
+
+    pub fn get_current_fee(env: Env) -> u32 {
+        get_current_fee(env)
+    }
+
+    pub fn apply_trade_volume(env: Env, vol: i128) -> Result<u32, ContractError> {
+        apply_trade_volume(&env, vol)
+    }
+
+    pub fn get_dynamic_fee_view(env: Env) -> DynamicFeeView {
+        get_dynamic_fee_view(env)
     }
 }
 
@@ -20655,6 +20798,17 @@ pub struct VaultRebalanceSummary {
 // ============================================================================
 
 /// One dynamic fee tier.
+///
+/// # Evaluation Order & Tie Resolution (#549)
+/// Tiers are evaluated in strictly ascending order of `volume_threshold`. When a creator's
+/// volume satisfies multiple tiers, the last matching tier wins so the lowest fee rate is applied.
+///
+/// ### Worked Example
+/// Given three tiers at 1,000, 5,000, and 10,000 XLM volume:
+/// A creator at 7,000 XLM qualifies for the first two tiers (1,000 and 5,000 XLM) and receives
+/// the tier-2 rate (the highest threshold met).
+///
+/// Updates take effect on the next trade (non-retroactive), and earned tiers are retained.
 #[derive(Clone, Debug, Eq, PartialEq)]
 #[contracttype]
 pub struct FeeTier {
@@ -21259,6 +21413,17 @@ pub fn rolling_volume(env: &Env) -> i128 {
     tot
 }
 
+/// Evaluates the active fee tier index based on cumulative/rolling volume (#549).
+///
+/// Tiers are evaluated in ascending order of `volume_threshold`. The loop stops as soon
+/// as a tier's threshold exceeds the volume, ensuring that the **last matching tier wins**.
+///
+/// ### Worked Example
+/// If tiers are configured at 1,000, 5,000, and 10,000 XLM:
+/// A volume of 7,000 XLM qualifies for tiers 0, 1, and 2 (thresholds 0, 1,000, 5,000).
+/// The last matching tier is index 2 (5,000 XLM), so the creator receives the tier-2 rate.
+///
+/// Changes take effect on the next trade (non-retroactive), and earned tiers are retained.
 fn active_tier_index(tiers: &Vec<FeeTier>, vol: i128) -> u32 {
     let mut idx: u32 = 0;
     for (pos, tier) in tiers.iter().enumerate() {
@@ -22580,3 +22745,5 @@ pub fn get_bootstrap_price(env: Env, key_id: Address) -> Option<i128> {
 mod test_community_polls;
 #[cfg(test)]
 mod test_issue_1056;
+#[cfg(test)]
+mod test_issue_1177;

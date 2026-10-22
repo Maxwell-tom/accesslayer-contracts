@@ -50,6 +50,59 @@ use soroban_sdk::{
 /// Event name for protocol trade fee collected on a buy or sell.
 pub const FEE_COLLECTED_EVENT_NAME: Symbol = symbol_short!("fee_coll");
 
+/// Event name for a per-key dynamic trade fee bracket change.
+pub const FEE_ADJUSTED_EVENT_NAME: Symbol = symbol_short!("fee_adj");
+pub const FEE_ADJUSTED_DATA_FIELDS: [&str; 5] = [
+    "key_id",
+    "previous_fee_bps",
+    "new_fee_bps",
+    "rolling_volume",
+    "timestamp",
+];
+
+/// Stable payload for a detected change in a key's dynamic trade fee.
+///
+/// Event shape:
+/// - topics: `(FEE_ADJUSTED_EVENT_NAME, key_id)`
+/// - data: `FeeAdjustedEvent`
+#[derive(Clone, Debug, Eq, PartialEq)]
+#[contracttype]
+pub struct FeeAdjustedEvent {
+    pub key_id: Address,
+    pub previous_fee_bps: u32,
+    pub new_fee_bps: u32,
+    pub rolling_volume: i128,
+    pub timestamp: u64,
+}
+
+/// Event name for a key moving between rolling-volume fee tiers.
+pub const KEY_FEE_TIER_CHANGED_EVENT_NAME: Symbol = symbol_short!("key_tier");
+pub const KEY_FEE_TIER_CHANGED_DATA_FIELDS: [&str; 6] = [
+    "key_id",
+    "new_tier_index",
+    "previous_fee_bps",
+    "new_fee_bps",
+    "rolling_volume",
+    "timestamp",
+];
+
+/// Stable payload emitted alongside [`FeeAdjustedEvent`] when a key's active
+/// fee tier changes, either after a trade or when 24-hour volume has decayed.
+///
+/// Event shape:
+/// - topics: `(KEY_FEE_TIER_CHANGED_EVENT_NAME, key_id)`
+/// - data: `KeyFeeTierChangedEvent`
+#[derive(Clone, Debug, Eq, PartialEq)]
+#[contracttype]
+pub struct KeyFeeTierChangedEvent {
+    pub key_id: Address,
+    pub new_tier_index: u32,
+    pub previous_fee_bps: u32,
+    pub new_fee_bps: u32,
+    pub rolling_volume: i128,
+    pub timestamp: u64,
+}
+
 /// Stable fee collection event payload for downstream indexers.
 ///
 /// Event shape:
@@ -504,6 +557,10 @@ pub struct AllocationClaimedEvent {
     pub ledger: u32,
 }
 
+/// Stable field order for protocol fee recipient updated event payloads (#573).
+pub const PROTOCOL_FEE_RECIPIENT_UPDATED_DATA_FIELDS: [&str; 3] =
+    ["old_recipient", "new_recipient", "updated_at_ledger"];
+
 /// Event shape:
 /// - topics: `(PROTOCOL_FEE_RECIPIENT_UPDATED_EVENT_NAME, admin)`
 /// - data: `ProtocolFeeRecipientUpdatedEvent`
@@ -512,6 +569,7 @@ pub struct AllocationClaimedEvent {
 pub struct ProtocolFeeRecipientUpdatedEvent {
     pub old_recipient: Address,
     pub new_recipient: Address,
+    pub updated_at_ledger: u32,
 }
 
 /// Event shape:
@@ -790,6 +848,28 @@ pub const TREASURY_WITHDRAWAL_EVENT_NAME: Symbol = symbol_short!("treas_out");
 
 /// Event name for creator storage TTL extension.
 pub const TTL_EXTENDED_EVENT_NAME: Symbol = symbol_short!("ttl_ext");
+
+/// Stable field order for TTL extension event payloads (#553, #573).
+pub const TTL_EXTENDED_DATA_FIELDS: [&str; 3] =
+    ["creator_id", "extended_at_ledger", "new_expiry_ledger"];
+
+/// Stable TTL extension event payload for downstream indexers and monitoring tools (#553, #573).
+///
+/// Event shape:
+/// - topics: `(TTL_EXTENDED_EVENT_NAME, creator)`
+/// - data: `TtlExtendedEvent`
+///
+/// Emitted when the contract extends a creator key's persistent storage TTL.
+#[derive(Clone, Debug, Eq, PartialEq)]
+#[contracttype]
+pub struct TtlExtendedEvent {
+    /// Creator key whose storage TTL was extended.
+    pub creator_id: Address,
+    /// Ledger sequence number at the time of TTL extension.
+    pub extended_at_ledger: u32,
+    /// New live-until ledger sequence number after extension.
+    pub new_expiry_ledger: u32,
+}
 
 /// Stable field order for treasury withdrawal event payloads.
 pub const TREASURY_WITHDRAWAL_DATA_FIELDS: [&str; 4] =
@@ -2413,6 +2493,70 @@ pub struct SlippageCheckPassedEvent {
 /// Shared slippage-check-passed event topics tuple.
 pub fn slippage_check_passed_topics(creator: &Address) -> (Symbol, Address) {
     (SLIPPAGE_CHECK_PASSED_EVENT_NAME, creator.clone())
+}
+
+/// Event name for a bonding-curve swap rejected by its price-impact guard.
+pub const SWAP_SLIPPAGE_EXCEEDED_EVENT_NAME: Symbol = symbol_short!("swap_slp");
+
+/// Emitted when a bonding-curve `swap` is rejected because the computed
+/// price impact exceeds the caller's `max_slippage_bps` tolerance. The
+/// payload carries both the actual impact and the requested ceiling so
+/// clients and indexers can surface the exact breach magnitude.
+///
+/// Event shape:
+/// - topics: `(SWAP_SLIPPAGE_EXCEEDED_EVENT_NAME, creator)`
+/// - data: `SwapSlippageExceededEvent`
+#[derive(Clone, Debug, Eq, PartialEq)]
+#[contracttype]
+pub struct SwapSlippageExceededEvent {
+    /// Creator whose bonding curve was being swapped against.
+    pub creator_id: Address,
+    /// Computed price impact of the rejected swap, in basis points.
+    pub actual_bps: u32,
+    /// Caller-supplied slippage ceiling that the impact breached.
+    pub max_bps: u32,
+    /// Ledger sequence at which the breach was detected.
+    pub ledger: u32,
+}
+
+/// Shared swap-slippage-exceeded event topics tuple.
+pub fn swap_slippage_exceeded_topics(creator: &Address) -> (Symbol, Address) {
+    (SWAP_SLIPPAGE_EXCEEDED_EVENT_NAME, creator.clone())
+}
+
+/// Event name for a completed cross-key atomic swap.
+pub const ATOMIC_SWAP_EVENT_NAME: Symbol = symbol_short!("atom_swap");
+
+/// Emitted when two wallets exchange keys of two different creators in one
+/// atomic transaction. The prices are the bonding-curve spot prices used to
+/// value each side, so `qty_a * price_a` and `qty_b * price_b` reconstruct the
+/// values the parity check compared.
+///
+/// Event shape:
+/// - topics: `(ATOMIC_SWAP_EVENT_NAME, key_a, key_b)`
+/// - data: `AtomicSwapEvent`
+#[derive(Clone, Debug, Eq, PartialEq)]
+#[contracttype]
+pub struct AtomicSwapEvent {
+    /// First creator key, given by the sender and received by the second wallet.
+    pub key_a: Address,
+    /// Quantity of `key_a` swapped.
+    pub qty_a: u32,
+    /// Bonding-curve spot price of `key_a` used to value the first leg.
+    pub price_a: i128,
+    /// Second creator key, given by the second wallet and received by the sender.
+    pub key_b: Address,
+    /// Quantity of `key_b` swapped.
+    pub qty_b: u32,
+    /// Bonding-curve spot price of `key_b` used to value the second leg.
+    pub price_b: i128,
+    /// Ledger sequence at which the swap settled.
+    pub ledger: u32,
+}
+
+/// Shared atomic-swap event topics tuple.
+pub fn atomic_swap_topics(key_a: &Address, key_b: &Address) -> (Symbol, Address, Address) {
+    (ATOMIC_SWAP_EVENT_NAME, key_a.clone(), key_b.clone())
 }
 
 // --- Max buy quantity per transaction (#828) ---
