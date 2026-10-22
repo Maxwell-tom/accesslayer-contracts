@@ -14,3 +14,5 @@ plan.md
 issue.md
 pr.md.gitignore
 branch_structure.json
+config.bat
+node_modules
